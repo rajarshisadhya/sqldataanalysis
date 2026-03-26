@@ -1,0 +1,193 @@
+WITH pillar_base_1 AS (
+    SELECT
+        marketplace_id,
+        CASE 
+        WHEN marketplace_id = 1 THEN 'US'
+        WHEN marketplace_id = 7 THEN 'CA'
+        WHEN marketplace_id = 3 THEN 'UK'
+        WHEN marketplace_id = 4 THEN 'DE'
+        WHEN marketplace_id = 5 THEN 'FR'
+        WHEN marketplace_id = 35691 THEN 'IT'
+        WHEN marketplace_id = 44551 THEN 'ES'
+        WHEN marketplace_id = 328451 THEN 'NL'
+        WHEN marketplace_id = 712115121 THEN 'PL'
+        WHEN marketplace_id = 704403121 THEN 'SE'
+        WHEN marketplace_id = 679831071 THEN 'BE'
+        ELSE 'OTHER' END AS store,
+        order_id,
+        asin,
+        brand_id,
+        merchant_customer_id as mcid,
+        gl_product_group,
+        product_group_desc as product_category,
+        is_pillar_chosen,
+        is_unit_avoided,
+        CASE
+        WHEN pillar = 'WORKFLOW' THEN 'SELF HELP CONTENT'
+        WHEN pillar = 'VIDEO' THEN 'SELF HELP VIDEO'
+        WHEN pillar = 'PARTS' THEN 'REPLACEMENT PARTS'
+        WHEN pillar = 'OEM' AND (is_oem_brand_call_shown = 1 OR is_oem_brand_callmenow_chosen = 1) THEN 'BRAND INTEGRATION CALL'
+        WHEN pillar = 'OEM' AND (is_oem_brand_chat_shown = 1 OR is_oem_brand_chat_chosen = 1) THEN 'BRAND INTEGRATION CHAT'
+        WHEN pillar = 'OEM' THEN 'MANUFACTURER SUPPORT'
+        ELSE 'OTHER' END AS pillar,
+        -- VOC fields for HMD calculation
+        is_voc_requested,
+        voc_response,
+        oem_brand_call_voc,
+        oem_brand_chat_voc,
+        is_within_rw,
+        is_chosen_ui_interacted,
+        shipped_units_orig,
+        pillar_chosen_datetime_utc
+    FROM "andes"."creturns_ddl"."fact_pls_pillar_performance"
+    WHERE marketplace_id IN (1,7,3,4,5,35691,44551,328451,712115121,704403121,679831071)
+        --AND ship_datetime BETWEEN '2026-01-01' AND '2026-01-31'
+        AND pillar_chosen_datetime_utc BETWEEN '2026-01-01' AND '2026-01-31'
+        --AND gl_product_group NOT IN ('309','194','193','325','14','328','510','199','200','15','21','467','198','27','197','74','160','236','293','153','396','540','370','541','261','641','751','307','442','515','653','349','542','264','228','663','298','721','750','446','441','517','171','259','395','397','251','246','20','749','405','114','129','657','266','675','444','594','195','111','394','318','748','44','543','752','234','350')
+        AND fulfiller = 'FBA'
+        AND is_fin_latest_pillar = 1
+        AND brand_id IN (SELECT DISTINCT brand_id FROM Andes.creturns_src.o_pls_oem_kb
+        WHERE LOWER(status) IN ('live')
+        AND marketplace_id IN (1,7,3,4,5,35691,44551,328451,712115121,704403121,679831071))
+        AND brand_id NOT IN (SELECT DISTINCT brand_id
+FROM andes.rr_test.pls_brand_mapping
+WHERE LOWER(enrollment_issue_desc_1) IN ('enrolled')
+AND mcid IS NOT NULL
+AND vendor_code IS NULL
+AND marketplace_id IN (1,7,3,4,5,35691,44551,328451,712115121,704403121,679831071))
+AND merchant_customer_id NOT IN (SELECT DISTINCT mcid
+FROM andes.rr_test.pls_brand_mapping
+WHERE LOWER(enrollment_issue_desc_1) IN ('enrolled')
+AND mcid IS NOT NULL
+AND vendor_code IS NULL
+AND marketplace_id IN (1,7,3,4,5,35691,44551,328451,712115121,704403121,679831071))
+),
+
+
+pillar_base AS (
+SELECT
+        marketplace_id,
+        store,
+        order_id,
+        brand_id,
+        asin,
+        mcid,
+        gl_product_group,
+        product_category,
+        is_pillar_chosen,
+        is_unit_avoided,
+        pillar,
+        is_voc_requested,
+        voc_response,
+        oem_brand_call_voc,
+        oem_brand_chat_voc,
+        is_within_rw,
+        is_chosen_ui_interacted,
+        shipped_units_orig,
+    	TO_CHAR(pillar_chosen_datetime_utc, 'MONTH') || TO_CHAR(pillar_chosen_datetime_utc, 'YYYY') as month
+    FROM pillar_base_1 
+WHERE pillar IN ('SELF HELP CONTENT','SELF HELP VIDEO','REPLACEMENT PARTS','MANUFACTURER SUPPORT')
+AND mcid IN (SELECT DISTINCT merchant_customer_id
+FROM "andes"."ISS_DIMENSION"."D_ISS_MERCHANT_BRAND_HIST"
+WHERE account_role = 'BRAND_REPRESENTATIVE'
+  AND account_type = 'THIRD_PARTY_SELLER'
+  AND is_active = 'Y'
+  AND verification_status = 'VERIFIED'
+  AND br2_flag = 'Y')
+AND brand_id IN (SELECT DISTINCT gcor_id
+FROM "andes"."ISS_DIMENSION"."D_ISS_MERCHANT_BRAND_HIST"
+WHERE account_role = 'BRAND_REPRESENTATIVE'
+  AND account_type = 'THIRD_PARTY_SELLER'
+  AND is_active = 'Y'
+  AND verification_status = 'VERIFIED'
+  AND br2_flag = 'Y')
+),
+
+
+voc_by_order AS (
+    SELECT
+        marketplace_id,
+        store,
+        order_id,
+        brand_id,
+        asin,
+        mcid,
+        gl_product_group,
+        product_category,
+    	month,
+        SUM(is_voc_requested) as total_voc_shown,
+        SUM(CASE
+            WHEN voc_response = 0 OR oem_brand_call_voc = 0 OR oem_brand_chat_voc = 0 THEN 1
+            ELSE 0
+        END) as total_negative_voc,
+        SUM(CASE
+            WHEN voc_response = 1 AND COALESCE(oem_brand_call_voc, 1) = 1 AND COALESCE(oem_brand_chat_voc, 1) = 1 THEN 1
+            ELSE 0
+        END) as total_positive_voc
+    FROM pillar_base
+    WHERE is_pillar_chosen = 1
+        AND is_within_rw = 1
+        AND is_chosen_ui_interacted = 1
+        AND shipped_units_orig IS NOT NULL
+        AND is_voc_requested = 1
+        AND pillar NOT IN ('OTHER')
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8,9
+),
+
+voc_metrics_by_order AS (
+    SELECT
+        marketplace_id,
+        store,
+        order_id,
+        brand_id,
+        asin,
+        mcid,
+        gl_product_group,
+        product_category,
+    	month,
+        CASE
+            WHEN total_negative_voc > 0 AND total_voc_shown > 0
+            THEN ROUND((total_negative_voc * 100.0 / total_voc_shown), 2)
+            ELSE NULL
+        END as nrr,
+        CASE
+            WHEN total_positive_voc > 0 AND total_voc_shown > 0
+            THEN ROUND((total_positive_voc * 100.0 / total_voc_shown), 2)
+            ELSE NULL
+        END as prr
+    FROM voc_by_order
+)
+
+SELECT
+    pb.asin AS ASIN,
+    pb.month,
+    pb.mcid AS MCID,
+    pb.brand_id,
+    pb.store,
+    pb.product_category,
+    SUM(CASE WHEN pb.is_pillar_chosen = 1 THEN shipped_units_orig ELSE 0 END) AS "No of units where Return Avoidance Resolution",
+    SUM(CASE WHEN pb.is_unit_avoided = 1 THEN shipped_units_orig ELSE 0 END) AS "No of units return prevented",
+    CASE
+        WHEN SUM(CASE WHEN pb.is_pillar_chosen = 1 THEN shipped_units_orig ELSE 0 END) > 0
+        THEN ROUND(
+            (SUM(CASE WHEN pb.is_unit_avoided = 1 THEN shipped_units_orig ELSE 0 END) * 100.0 /
+             SUM(CASE WHEN pb.is_pillar_chosen = 1 THEN shipped_units_orig ELSE 0 END)), 2
+        ) || '%'
+        ELSE NULL
+    END AS "Return Prevention Rate"
+FROM pillar_base pb
+LEFT JOIN voc_metrics_by_order vm
+    ON pb.marketplace_id = vm.marketplace_id
+    AND pb.order_id = vm.order_id
+    AND pb.asin = vm.asin
+    AND pb.mcid = vm.mcid
+    AND pb.gl_product_group = vm.gl_product_group
+WHERE pb.pillar NOT IN ('OTHER')
+GROUP BY 1,2,3,4,5, 6
+
+;
+
+
+
+
+
